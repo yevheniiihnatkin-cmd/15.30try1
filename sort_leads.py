@@ -12,6 +12,9 @@
   --course N           курс навчання (лише для тих, хто ще вчиться), --course-max N
   --seniority a,b      trainee, junior, middle, senior, lead, unknown
   --job-seeker         лише з бейджем Open to work
+  --track a,b          напрям QA: automation, mixed, manual, unknown
+  --stage S            intermediate (за замовч.) | qualified — у яку папку зберегти
+  --name N             назва вибірки; файл: leads/<stage>/<N>_<YYYY-MM-DD_HH-MM-SS>.csv
   --keep-unknown       не відсікати лідів, у яких для фільтра немає даних
                        (досвід/освіта не витягнуті з профілю)
 
@@ -22,8 +25,10 @@
 import argparse
 import csv
 import re
+import os
 import sys
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 # Технічні / дубльовані колонки, які не потрібні для роботи з лідами
 DROP_COLUMNS = {
@@ -55,6 +60,43 @@ SENIORITY_PATTERNS = [
 ]
 
 TODAY = date.today()
+TZ = ZoneInfo("Europe/Kyiv")
+
+# папки для результатів
+OUT_DIRS = {"intermediate": os.path.join("leads", "intermediate"),
+            "qualified": os.path.join("leads", "qualified")}
+
+AUTO_RE = r"(automation|automated|\baqa\b|auto\s*test|autotest|\bsdet\b|автоматиз)"
+MANUAL_RE = r"(manual|мануал|ручн)"
+ASPIRATION_RE = r"(looking for|eager to|learn|want to|seeking|шукаю|вивча)"
+
+
+def qa_track(row):
+    """automation / mixed / manual / unknown — за headline і посадою.
+    Сегменти з бажаннями ('looking for', 'eager to learn') не враховуються."""
+    text = " | ".join((row.get(k) or "") for k in ("current_company_position", "headline"))
+    # спершу відкидаємо цілі блоки (між "|") з побажаннями, потім ділимо решту
+    blocks = [x.lower() for x in text.split("|") if x.strip()]
+    blocks = [x for x in blocks if not re.search(ASPIRATION_RE, x)]
+    segs = [y for x in blocks for y in re.split(r"[/,]", x) if y.strip()]
+    primary = (row.get("current_company_position") or row.get("headline") or "").lower()
+    primary = re.split(r"\|", primary)[0]
+    if re.search(ASPIRATION_RE, primary):
+        primary = ""
+    p_auto, p_man = bool(re.search(AUTO_RE, primary)), bool(re.search(MANUAL_RE, primary))
+    any_auto = any(re.search(AUTO_RE, x) for x in segs)
+    any_man = any(re.search(MANUAL_RE, x) for x in segs)
+    if p_auto and p_man:
+        return "mixed"
+    if p_auto:
+        return "automation"
+    if any_auto and any_man:
+        return "mixed"
+    if any_auto:
+        return "automation"
+    if any_man:
+        return "manual"
+    return "unknown"
 
 
 def parse_date(s):
@@ -140,7 +182,12 @@ def keyword_hits(row, keywords):
 def main():
     p = argparse.ArgumentParser(description="Фільтрація лідів Linked Helper")
     p.add_argument("input")
-    p.add_argument("-o", "--output", default="leads_filtered.csv")
+    p.add_argument("-o", "--output",
+                   help="явний шлях до файлу; за замовчуванням leads/<stage>/<name>_<дата_час>.csv")
+    p.add_argument("--stage", choices=["intermediate", "qualified"], default="intermediate",
+                   help="intermediate — проміжний результат, qualified — готові ліди для імпорту в LH")
+    p.add_argument("--name", default="leads", help="назва вибірки в імені файлу")
+    p.add_argument("--track", help="напрям QA через кому: automation,mixed,manual,unknown")
     p.add_argument("--max-exp", type=float)
     p.add_argument("--min-exp", type=float)
     p.add_argument("--keywords", help="через кому: playwright,java,cypress")
@@ -166,13 +213,15 @@ def main():
 
     keywords = [k.strip().lower() for k in (a.keywords or "").split(",") if k.strip()]
     levels = {s.strip().lower() for s in (a.seniority or "").split(",") if s.strip()}
-    drops = {"exp": 0, "kw": 0, "edu": 0, "sen": 0, "js": 0}
+    tracks = {s.strip().lower() for s in (a.track or "").split(",") if s.strip()}
+    drops = {"exp": 0, "kw": 0, "edu": 0, "sen": 0, "js": 0, "trk": 0}
     out = []
 
     for r in rows:
         exp = experience_years(r)
         edu, course = education_info(r)
         sen = seniority(r)
+        trk = qa_track(r)
         hits = keyword_hits(r, keywords) if keywords else []
 
         if a.max_exp is not None or a.min_exp is not None:
@@ -206,9 +255,13 @@ def main():
         if levels and sen not in levels:
             drops["sen"] += 1; continue
 
+        if tracks and trk not in tracks:
+            drops["trk"] += 1; continue
+
         r = dict(r)
         r.update({
             "seniority": sen,
+            "qa_track": trk,
             "exp_years": "" if exp is None else exp,
             "education_status": edu,
             "education_course": course or "",
@@ -223,7 +276,7 @@ def main():
         -len(r["matched_keywords"].split(", ")) if r["matched_keywords"] else 0,
     ))
 
-    computed = ["seniority", "exp_years", "education_status", "education_course", "matched_keywords"]
+    computed = ["seniority", "qa_track", "exp_years", "education_status", "education_course", "matched_keywords"]
     cols = list(rows[0].keys())
     if not a.keep_all_columns:
         nonempty = {k for k in cols if any((x.get(k) or "").strip() for x in rows)}
@@ -233,13 +286,20 @@ def main():
     fieldnames = ["full_name", "profile_url"] + computed + \
                  [c for c in cols if c not in ("full_name", "profile_url")]
 
-    with open(a.output, "w", encoding="utf-8-sig", newline="") as f:
+    if a.output:
+        out_path = a.output
+    else:
+        stamp = datetime.now(TZ).strftime("%Y-%m-%d_%H-%M-%S")
+        out_path = os.path.join(OUT_DIRS[a.stage], f"{a.name}_{stamp}.csv")
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+
+    with open(out_path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames, delimiter=";", extrasaction="ignore")
         w.writeheader()
         w.writerows(out)
 
-    print(f"Всього: {len(rows)} → після фільтрів: {len(out)} → {a.output}")
-    print("Відсічено: досвід {exp}, стек {kw}, освіта {edu}, seniority {sen}, job seeker {js}".format(**drops))
+    print(f"Всього: {len(rows)} → після фільтрів: {len(out)} → {out_path}")
+    print("Відсічено: досвід {exp}, стек {kw}, освіта {edu}, seniority {sen}, job seeker {js}, напрям QA {trk}".format(**drops))
     no_exp = sum(1 for r in rows if experience_years(r) is None)
     no_edu = sum(1 for r in rows if not (r.get("education_1") or "").strip())
     if no_exp or no_edu:
