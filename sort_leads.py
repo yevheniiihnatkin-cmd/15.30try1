@@ -15,6 +15,8 @@
   --track a,b          напрям QA: automation, mixed, manual, unknown
   --stage S            intermediate (за замовч.) | to_extract | qualified — у яку папку зберегти
   --name N             назва вибірки; файл: leads/<stage>/<N>_<YYYY-MM-DD_HH-MM-SS>.csv
+  --exclude F [F ...]  відкинути лідів, які вже є в цих файлах (маски: "leads/raw/*.csv")
+  --extract-candidates відбір кандидатів на Visit & extract (див. --help)
   --keep-unknown       не відсікати лідів, у яких для фільтра немає даних
                        (досвід/освіта не витягнуті з профілю)
 
@@ -24,6 +26,7 @@
 """
 import argparse
 import csv
+import glob
 import re
 import os
 import sys
@@ -63,7 +66,8 @@ TODAY = date.today()
 TZ = ZoneInfo("Europe/Kyiv")
 
 # папки для результатів
-OUT_DIRS = {"intermediate": os.path.join("leads", "intermediate"),
+OUT_DIRS = {"raw": os.path.join("leads", "raw"),
+            "intermediate": os.path.join("leads", "intermediate"),
             "to_extract": os.path.join("leads", "to_extract"),
             "qualified": os.path.join("leads", "qualified")}
 
@@ -139,6 +143,25 @@ NOT_COUNTED_RE = (r"(trainee|intern\b|internship|стажу|стажер|ста�
                   r"volunteer|волонтер|freelance student)")
 # не-IT ролі, які можуть містити слово "engineer"/"support"
 NON_IT_RE = r"(customer support|support specialist|sales|продаж|оператор|operator|кол-центр|call center)"
+
+
+def lead_ids(row):
+    ids = set()
+    for k in ("profile_url", "public_id", "member_id"):
+        v = (row.get(k) or "").strip().lower().rstrip("/")
+        if v:
+            ids.add(f"{k}:{v}")
+    return ids
+
+
+def load_ids(path):
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        sample = f.read(4096); f.seek(0)
+        delim = ";" if sample.count(";") > sample.count(",") else ","
+        ids = set()
+        for r in csv.DictReader(f, delimiter=delim):
+            ids |= lead_ids(r)
+    return ids
 
 
 def position_slots(row):
@@ -272,6 +295,13 @@ def main():
     p.add_argument("--seniority", help="через кому: junior,middle,unknown")
     p.add_argument("--job-seeker", action="store_true",
                    help="лише ліди з бейджем Open to work (badges_job_seeker = true)")
+    p.add_argument("--exclude", nargs="+", metavar="CSV",
+                   help="файли/маски з уже баченими лідами; такі ліди відкидаються "
+                        "(звірка за profile_url, public_id, member_id)")
+    p.add_argument("--extract-candidates", action="store_true",
+                   help="відбір кандидатів на Visit & extract: (Open to work і рівень trainee/junior/"
+                        "невідомий, напрям не manual) АБО (trainee/junior з напрямом automation/mixed); "
+                        "не-IT профілі відкидаються")
     p.add_argument("--keep-unknown", action="store_true",
                    help="залишати лідів без даних для фільтра досвіду/освіти")
     p.add_argument("--keep-all-columns", action="store_true",
@@ -288,10 +318,26 @@ def main():
     keywords = [k.strip().lower() for k in (a.keywords or "").split(",") if k.strip()]
     levels = {s.strip().lower() for s in (a.seniority or "").split(",") if s.strip()}
     tracks = {s.strip().lower() for s in (a.track or "").split(",") if s.strip()}
+
+    seen = set()
+    for pattern in a.exclude or []:
+        for path in sorted(glob.glob(pattern)) or [pattern]:
+            if os.path.abspath(path) == os.path.abspath(a.input):
+                continue
+            seen |= load_ids(path)
+    dup_seen = 0
+    in_file = set()
     drops = {"exp": 0, "kw": 0, "edu": 0, "sen": 0, "js": 0, "trk": 0}
     out = []
 
     for r in rows:
+        ids = lead_ids(r)
+        if ids & seen:
+            dup_seen += 1; continue
+        if ids & in_file:
+            continue
+        in_file |= ids
+
         exp, exp_note = experience_years(r)
         edu, course = education_info(r)
         sen = seniority(r)
@@ -325,6 +371,17 @@ def main():
 
         if a.job_seeker and (r.get("badges_job_seeker") or "").lower() != "true":
             drops["js"] += 1; continue
+
+        if a.extract_candidates:
+            seeker = (r.get("badges_job_seeker") or "").lower() == "true"
+            hl = " ".join((r.get(k) or "") for k in ("headline", "current_company_position")).lower()
+            non_it = re.search(NON_IT_RE, hl) or (
+                trk == "unknown" and not re.search(r"(\bqa\b|\baqa\b|test|тестув|quality)", hl))
+            ok = not non_it and (
+                (seeker and sen in ("trainee", "junior", "unknown") and trk != "manual") or
+                (sen in ("trainee", "junior") and trk in ("automation", "mixed")))
+            if not ok:
+                drops["sen"] += 1; continue
 
         if levels and sen not in levels:
             drops["sen"] += 1; continue
@@ -373,6 +430,8 @@ def main():
         w.writeheader()
         w.writerows(out)
 
+    if seen:
+        print(f"Відкинуто як уже бачених: {dup_seen}")
     print(f"Всього: {len(rows)} → після фільтрів: {len(out)} → {out_path}")
     print("Відсічено: досвід {exp}, стек {kw}, освіта {edu}, seniority {sen}, job seeker {js}, напрям QA {trk}".format(**drops))
     no_exp = sum(1 for r in rows if experience_years(r)[0] is None)
