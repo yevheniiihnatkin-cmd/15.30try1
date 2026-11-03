@@ -3,8 +3,8 @@
 Сортування / фільтрація лідів з CSV-експорту Linked Helper.
 
 Фільтри:
-  --max-exp N          загальний досвід в IT до N років (рахується від найранішого
-                       organization_start_* до сьогодні)
+  --max-exp N          комерційний стаж в IT/QA до N років: рахуються лише IT/QA-посади,
+                       стажування/курси/лаби не рахуються, паралельні періоди склеюються
   --min-exp N          досвід від N років
   --keywords a,b,c     ключові слова стеку (шукає в headline, посаді, summary,
                        skills, описах посад); --match any|all
@@ -99,6 +99,12 @@ def qa_track(row):
     return "unknown"
 
 
+MONTHS = {k: i + 1 for i, names in enumerate([
+    ("jan", "січ"), ("feb", "лют"), ("mar", "берез"), ("apr", "квіт"), ("may", "трав"),
+    ("jun", "черв"), ("jul", "лип"), ("aug", "серп"), ("sep", "верес"), ("oct", "жовт"),
+    ("nov", "листоп"), ("dec", "груд")]) for k in names}
+
+
 def parse_date(s):
     """Повертає (рік, місяць) з довільного формату дати LH або None."""
     if not s or not s.strip():
@@ -111,7 +117,9 @@ def parse_date(s):
         return int(m.group(2)), int(m.group(1))
     m = re.search(r"(19|20)\d{2}", s)                     # 2021 / Mar 2021
     if m:
-        return int(m.group(0)), 1
+        low = s.lower()
+        month = next((n for k, n in MONTHS.items() if k in low), 1)
+        return int(m.group(0)), month
     return None
 
 
@@ -119,13 +127,73 @@ def months_between(a, b):
     return (b[0] - a[0]) * 12 + (b[1] - a[1])
 
 
+# посада рахується в стаж, якщо це IT/QA-роль
+IT_ROLE_RE = (r"(\bqa\b|\baqa\b|quality assurance|test|тестув|\bsdet\b|automation|"
+              r"developer|engineer|програміст|розробник|devops|\bdata\b|analyst|"
+              r"\bbi\b|frontend|backend|full[\s-]?stack|\bios\b|android|python|java|"
+              r"javascript|\.net|software|web\b|ui/ux|product|scrum|support engineer)")
+# не рахуються: стажування, курси, лабораторії, навчання
+NOT_COUNTED_RE = (r"(trainee|intern\b|internship|стажу|стажер|стажист|\blab\b|laboratory|"
+                  r"course|курс|bootcamp|academy|академ|mentee|student|студент|"
+                  r"volunteer|волонтер|freelance student)")
+# не-IT ролі, які можуть містити слово "engineer"/"support"
+NON_IT_RE = r"(customer support|support specialist|sales|продаж|оператор|operator|кол-центр|call center)"
+
+
+def position_slots(row):
+    """Номери заповнених позицій organization_N у рядку."""
+    nums = sorted({int(m.group(1)) for k in row for m in [re.fullmatch(r"organization_(\d+)", k)] if m})
+    return [i for i in nums if (row.get(f"organization_{i}") or row.get(f"organization_title_{i}") or "").strip()]
+
+
+def is_counted_position(row, i):
+    title = (row.get(f"organization_title_{i}") or "").lower()
+    ctx = " ".join((row.get(k) or "").lower() for k in
+                   (f"organization_{i}", f"organization_description_{i}", f"position_description_{i}"))
+    if re.search(NOT_COUNTED_RE, title) or re.search(NOT_COUNTED_RE, row.get(f"organization_{i}", "").lower()):
+        return False
+    if re.search(NON_IT_RE, title):
+        return False
+    return bool(re.search(IT_ROLE_RE, title) or (not title and re.search(IT_ROLE_RE, ctx)))
+
+
 def experience_years(row):
-    starts = [parse_date(row.get(f"organization_start_{i}", "")) for i in range(1, 6)]
-    starts = [s for s in starts if s]
-    if not starts:
-        return None
-    first = min(starts)
-    return round(max(months_between(first, (TODAY.year, TODAY.month)), 0) / 12, 1)
+    """Комерційний стаж в IT/QA у роках.
+    - лише IT/QA-посади; стажування, курси, лабораторії не рахуються;
+    - періоди, що накладаються, склеюються;
+    - відкрита дата завершення = сьогодні.
+    Повертає (роки | None якщо немає даних, примітка)."""
+    slots = position_slots(row)
+    if not slots:
+        return None, "немає даних про досвід"
+    now = (TODAY.year, TODAY.month)
+    periods = []
+    for i in slots:
+        if not is_counted_position(row, i):
+            continue
+        start = parse_date(row.get(f"organization_start_{i}", ""))
+        if not start:
+            continue
+        end = parse_date(row.get(f"organization_end_{i}", "")) or now
+        a, b = start[0] * 12 + start[1], end[0] * 12 + end[1] + 1  # включно з місяцем завершення
+        if b > a:
+            periods.append((a, b))
+    periods.sort()
+    total, cur = 0, None
+    for a, b in periods:
+        if cur and a <= cur[1]:
+            cur = (cur[0], max(cur[1], b))
+        else:
+            if cur:
+                total += cur[1] - cur[0]
+            cur = (a, b)
+    if cur:
+        total += cur[1] - cur[0]
+    all_cols = sorted({int(m.group(1)) for k in row for m in [re.fullmatch(r"organization_(\d+)", k)] if m})
+    note = ""
+    if all_cols and len(slots) == len(all_cols):
+        note = f"заповнені всі {len(all_cols)} слоти позицій — ранній досвід міг не потрапити в експорт"
+    return round(total / 12, 1), note
 
 
 def education_info(row):
@@ -160,6 +228,10 @@ def education_info(row):
 def seniority(row):
     text = " ".join((row.get(k) or "") for k in
                     ("current_company_position", "headline", "organization_title_1")).lower()
+    found = {lvl for lvl, pat in SENIORITY_PATTERNS if re.search(pat, text)}
+    # "Junior/Middle" чи "Middle Manual QA, Junior Automation QA" — вважаємо junior
+    if "junior" in found and "middle" in found and not found & {"senior", "lead"}:
+        return "junior"
     for level, pat in SENIORITY_PATTERNS:
         if re.search(pat, text):
             return level
@@ -218,7 +290,7 @@ def main():
     out = []
 
     for r in rows:
-        exp = experience_years(r)
+        exp, exp_note = experience_years(r)
         edu, course = education_info(r)
         sen = seniority(r)
         trk = qa_track(r)
@@ -263,6 +335,7 @@ def main():
             "seniority": sen,
             "qa_track": trk,
             "exp_years": "" if exp is None else exp,
+            "exp_note": exp_note,
             "education_status": edu,
             "education_course": course or "",
             "matched_keywords": ", ".join(hits),
@@ -276,7 +349,7 @@ def main():
         -len(r["matched_keywords"].split(", ")) if r["matched_keywords"] else 0,
     ))
 
-    computed = ["seniority", "qa_track", "exp_years", "education_status", "education_course", "matched_keywords"]
+    computed = ["seniority", "qa_track", "exp_years", "exp_note", "education_status", "education_course", "matched_keywords"]
     cols = list(rows[0].keys())
     if not a.keep_all_columns:
         nonempty = {k for k in cols if any((x.get(k) or "").strip() for x in rows)}
@@ -300,7 +373,7 @@ def main():
 
     print(f"Всього: {len(rows)} → після фільтрів: {len(out)} → {out_path}")
     print("Відсічено: досвід {exp}, стек {kw}, освіта {edu}, seniority {sen}, job seeker {js}, напрям QA {trk}".format(**drops))
-    no_exp = sum(1 for r in rows if experience_years(r) is None)
+    no_exp = sum(1 for r in rows if experience_years(r)[0] is None)
     no_edu = sum(1 for r in rows if not (r.get("education_1") or "").strip())
     if no_exp or no_edu:
         print(f"⚠ Без даних про досвід: {no_exp}, без освіти: {no_edu}. "
