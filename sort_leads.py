@@ -146,7 +146,7 @@ def months_between(a, b):
 
 
 # посада рахується в стаж, якщо це IT/QA-роль
-IT_ROLE_RE = (r"(\bqa\b|\baqa\b|quality assurance|test|тестув|\bsdet\b|automation|"
+IT_ROLE_RE = (r"(\bqa\b|\bqc\b|\baqa\b|quality assurance|test|тестув|\bsdet\b|automation|"
               r"developer|програміст|розробник|devops|data (?:engineer|analyst|scientist)|"
               r"(?:software|qa|test|automation|devops|data|cloud|ml|ai|validation|system|backend|"
               r"frontend|mobile|web|security)\s+engineer|"
@@ -159,7 +159,7 @@ NOT_COUNTED_RE = (r"(trainee|intern\b|internship|стажу|стажер|ста�
                   r"practice|практик|applicant|candidate|looking for|"
                   r"volunteer|волонтер|freelance student)")
 # організації-школи/курси: посада там — навчання, не комерційний досвід
-SCHOOL_ORG_RE = r"(school|школа|academy|академ|courses|курси|hillel|mate academy|foxminded|okten)"
+SCHOOL_ORG_RE = r"(school|школа|education|освіт|academy|академ|courses|курси|hillel|mate academy|foxminded|okten)"
 # не-IT ролі, які можуть містити слово "engineer"/"support"
 NON_IT_RE = (r"(customer support|support specialist|tech support|technical support|sales|продаж|оператор|"
              r"operator|кол-центр|call center|land manag|землевпоряд)")
@@ -245,12 +245,13 @@ def experience_years(row):
             return 0.0, "у профілі немає жодної посади"
         return None, "немає даних про досвід"
     now = (TODAY.year, TODAY.month)
-    periods = []
+    periods, undated = [], []
     for i in slots:
         if not is_counted_position(row, i):
             continue
         start = parse_date(row.get(f"organization_start_{i}", ""))
         if not start:
+            undated.append((row.get(f"organization_title_{i}") or "?") + " @ " + (row.get(f"organization_{i}") or "?"))
             continue
         end = parse_date(row.get(f"organization_end_{i}", "")) or now
         a, b = start[0] * 12 + start[1], end[0] * 12 + end[1] + 1  # включно з місяцем завершення
@@ -269,9 +270,11 @@ def experience_years(row):
         total += cur[1] - cur[0]
     all_cols = sorted({int(m.group(1)) for k in row for m in [re.fullmatch(r"organization_(\d+)", k)] if m})
     note = ""
+    if undated:
+        note = "IT/QA-посада без дат: " + "; ".join(undated)[:120] + ". "
     if all_cols and len(slots) == len(all_cols):
-        note = f"заповнені всі {len(all_cols)} слоти позицій — ранній досвід міг не потрапити в експорт"
-    return round(total / 12, 1), note
+        note += f"заповнені всі {len(all_cols)} слоти позицій — ранній досвід міг не потрапити в експорт"
+    return round(total / 12, 1), note.strip()
 
 
 def education_info(row):
