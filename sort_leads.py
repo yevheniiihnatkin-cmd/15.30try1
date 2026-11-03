@@ -13,7 +13,7 @@
   --seniority a,b      trainee, junior, middle, senior, lead, unknown
   --job-seeker         лише з бейджем Open to work
   --track a,b          напрям QA: automation, mixed, manual, unknown
-  --stage S            intermediate (за замовч.) | qualified — у яку папку зберегти
+  --stage S            intermediate (за замовч.) | to_extract | qualified — у яку папку зберегти
   --name N             назва вибірки; файл: leads/<stage>/<N>_<YYYY-MM-DD_HH-MM-SS>.csv
   --keep-unknown       не відсікати лідів, у яких для фільтра немає даних
                        (досвід/освіта не витягнуті з профілю)
@@ -64,6 +64,7 @@ TZ = ZoneInfo("Europe/Kyiv")
 
 # папки для результатів
 OUT_DIRS = {"intermediate": os.path.join("leads", "intermediate"),
+            "to_extract": os.path.join("leads", "to_extract"),
             "qualified": os.path.join("leads", "qualified")}
 
 AUTO_RE = r"(automation|automated|\baqa\b|auto\s*test|autotest|\bsdet\b|автоматиз)"
@@ -256,8 +257,9 @@ def main():
     p.add_argument("input")
     p.add_argument("-o", "--output",
                    help="явний шлях до файлу; за замовчуванням leads/<stage>/<name>_<дата_час>.csv")
-    p.add_argument("--stage", choices=["intermediate", "qualified"], default="intermediate",
-                   help="intermediate — проміжний результат, qualified — готові ліди для імпорту в LH")
+    p.add_argument("--stage", choices=["intermediate", "to_extract", "qualified"], default="intermediate",
+                   help="intermediate — проміжний результат; to_extract — профілі для Visit & extract "
+                        "у Linked Helper; qualified — готові ліди для імпорту в LH")
     p.add_argument("--name", default="leads", help="назва вибірки в імені файлу")
     p.add_argument("--track", help="напрям QA через кому: automation,mixed,manual,unknown")
     p.add_argument("--max-exp", type=float)
