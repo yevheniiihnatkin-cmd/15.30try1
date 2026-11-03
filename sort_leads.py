@@ -49,6 +49,13 @@ DROP_COLUMNS = {
     "result_created_at_iso", "invited_date", "message_1_send_at",
     "replied_message_1_send_at", "last_sent_message_send_at",
     "last_received_message_send_at",
+    "email", "email_type", "third_party_email_1", "third_party_email_source_1",
+    "third_party_email_is_valid_1", "third_party_email_type_1", "third_party_email_2",
+    "third_party_email_source_2", "third_party_email_is_valid_2", "third_party_email_type_2",
+    "third_party_email_3", "third_party_email_source_3", "third_party_email_is_valid_3",
+    "third_party_email_type_3", "phone_1", "phone_type_1", "phone_2", "phone_type_2",
+    "messenger_1", "messenger_provider_1", "messenger_2", "messenger_provider_2",
+    "birthday", "address", "twitters", "website_1", "website_2", "website_3",
 }
 # Колонки, без яких не можна повторно імпортувати лідів у Linked Helper
 ALWAYS_KEEP = {"id", "public_id", "member_id", "profile_url", "full_name"}
@@ -73,6 +80,8 @@ OUT_DIRS = {"raw": os.path.join("leads", "raw"),
 
 AUTO_RE = r"(automation|automated|\baqa\b|auto\s*test|autotest|\bsdet\b|автоматиз)"
 MANUAL_RE = r"(manual|мануал|ручн)"
+AUTO_TOOLS_RE = (r"(selenium|selenide|playwright|cypress|webdriver|appium|pytest|testng|junit|"
+                 r"rest[\s-]?assured|cucumber|test automation|qa automation|автоматизац)")
 ASPIRATION_RE = r"(looking for|eager to|learn|want to|seeking|шукаю|вивча)"
 
 
@@ -99,9 +108,13 @@ def qa_track(row):
         return "mixed"
     if any_auto:
         return "automation"
+    # після екстракту: інструменти автоматизації в скілах/summary/описі поточної посади
+    extra = " ".join((row.get(k) or "") for k in ("skills", "summary", "position_description_1")).lower()
+    qa_ctx = re.search(r"(\bqa\b|\baqa\b|\bqc\b|test|тестув|quality|забезпечення якості)", text.lower())
+    tools = bool(qa_ctx and re.search(AUTO_TOOLS_RE, extra))
     if any_man:
-        return "manual"
-    return "unknown"
+        return "mixed" if tools else "manual"
+    return "automation" if tools else "unknown"
 
 
 MONTHS = {k: i + 1 for i, names in enumerate([
@@ -134,15 +147,26 @@ def months_between(a, b):
 
 # посада рахується в стаж, якщо це IT/QA-роль
 IT_ROLE_RE = (r"(\bqa\b|\baqa\b|quality assurance|test|тестув|\bsdet\b|automation|"
-              r"developer|engineer|програміст|розробник|devops|\bdata\b|analyst|"
+              r"developer|програміст|розробник|devops|data (?:engineer|analyst|scientist)|"
+              r"(?:software|qa|test|automation|devops|data|cloud|ml|ai|validation|system|backend|"
+              r"frontend|mobile|web|security)\s+engineer|"
               r"\bbi\b|frontend|backend|full[\s-]?stack|\bios\b|android|python|java|"
-              r"javascript|\.net|software|web\b|ui/ux|product|scrum|support engineer)")
+              r"javascript|\.net|software|web developer|ui/ux|product (?:owner|manager)|"
+              r"scrum master|business analyst|system analyst|\bit\b)")
 # не рахуються: стажування, курси, лабораторії, навчання
 NOT_COUNTED_RE = (r"(trainee|intern\b|internship|стажу|стажер|стажист|\blab\b|laboratory|"
-                  r"course|курс|bootcamp|academy|академ|mentee|student|студент|"
+                  r"course|курс|bootcamp|academy|академ|mentee|student|студент|training|"
+                  r"practice|практик|applicant|candidate|looking for|"
                   r"volunteer|волонтер|freelance student)")
+# організації-школи/курси: посада там — навчання, не комерційний досвід
+SCHOOL_ORG_RE = r"(school|школа|academy|академ|courses|курси|hillel|mate academy|foxminded|okten)"
 # не-IT ролі, які можуть містити слово "engineer"/"support"
-NON_IT_RE = r"(customer support|support specialist|sales|продаж|оператор|operator|кол-центр|call center)"
+NON_IT_RE = (r"(customer support|support specialist|tech support|technical support|sales|продаж|оператор|"
+             r"operator|кол-центр|call center|land manag|землевпоряд)")
+# контекст речення, у якому досвід — не в IT
+NON_IT_CONTEXT_RE = (r"(banking|bank\b|банк|logistic|логіст|customer service|gambling|sales|"
+                     r"retail|before moving into it|before it|tech support|years old|років від роду)")
+IT_CONTEXT_RE = r"(\bqa\b|aqa|test|тестув|automation|автоматиз|quality|engineer|developer|\bit\b|software)"
 
 
 def lead_ids(row):
@@ -174,11 +198,38 @@ def is_counted_position(row, i):
     title = (row.get(f"organization_title_{i}") or "").lower()
     ctx = " ".join((row.get(k) or "").lower() for k in
                    (f"organization_{i}", f"organization_description_{i}", f"position_description_{i}"))
-    if re.search(NOT_COUNTED_RE, title) or re.search(NOT_COUNTED_RE, row.get(f"organization_{i}", "").lower()):
+    org = (row.get(f"organization_{i}") or "").lower()
+    if re.search(NOT_COUNTED_RE, title) or re.search(NOT_COUNTED_RE, org) or re.search(SCHOOL_ORG_RE, org):
         return False
     if re.search(NON_IT_RE, title):
         return False
     return bool(re.search(IT_ROLE_RE, title) or (not title and re.search(IT_ROLE_RE, ctx)))
+
+
+WORD_NUM = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+            "eight": 8, "nine": 9, "ten": 10, "один": 1, "одного": 1, "два": 2, "двох": 2,
+            "три": 3, "трьох": 3, "чотири": 4, "п'ять": 5}
+CLAIM_RE = re.compile(
+    r"(?:over|more than|понад|більше)?\s*(\d+(?:[.,]\d+)?|" + "|".join(WORD_NUM) + r")\s*\+?\s*"
+    r"(?:years?|yrs?|рок(?:и|ів|у)|years'|рік)", re.I)
+
+
+def claimed_years(row):
+    """Максимум років досвіду, які людина сама вказала в summary/headline."""
+    text = " ".join((row.get(k) or "") for k in ("summary", "headline")).lower()
+    best = None
+    for m in CLAIM_RE.finditer(text):
+        # речення, де згадано роки: має бути про IT/QA і не про інші сфери чи вік
+        a = max(text.rfind(c, 0, m.start()) for c in ".!?•\n")
+        ends = [i for i in (text.find(c, m.end()) for c in ".!?•\n") if i != -1]
+        sent = text[a + 1: min(ends) if ends else len(text)]
+        if not re.search(IT_CONTEXT_RE, sent) or re.search(NON_IT_CONTEXT_RE, sent):
+            continue
+        raw = m.group(1).replace(",", ".")
+        val = WORD_NUM.get(raw) or float(raw)
+        if 0 < val <= 40:
+            best = max(best or 0, val)
+    return best
 
 
 def experience_years(row):
@@ -189,6 +240,9 @@ def experience_years(row):
     Повертає (роки | None якщо немає даних, примітка)."""
     slots = position_slots(row)
     if not slots:
+        # профіль пройшов Visit & extract (є result_created_at), але посад у ньому немає
+        if (row.get("result_created_at_iso") or row.get("result_created_at") or "").strip():
+            return 0.0, "у профілі немає жодної посади"
         return None, "немає даних про досвід"
     now = (TODAY.year, TODAY.month)
     periods = []
@@ -277,7 +331,7 @@ def keyword_hits(row, keywords):
 
 def main():
     p = argparse.ArgumentParser(description="Фільтрація лідів Linked Helper")
-    p.add_argument("input")
+    p.add_argument("input", nargs="+", help="один або кілька CSV-експортів LH (об'єднуються)")
     p.add_argument("-o", "--output",
                    help="явний шлях до файлу; за замовчуванням leads/<stage>/<name>_<дата_час>.csv")
     p.add_argument("--stage", choices=["intermediate", "to_extract", "qualified"], default="intermediate",
@@ -308,10 +362,16 @@ def main():
                    help="не прибирати технічні та порожні колонки")
     a = p.parse_args()
 
-    with open(a.input, encoding="utf-8-sig", newline="") as f:
-        sample = f.read(4096); f.seek(0)
-        delim = ";" if sample.count(";") > sample.count(",") else ","
-        rows = list(csv.DictReader(f, delimiter=delim))
+    rows, all_cols = [], []
+    for path in a.input:
+        with open(path, encoding="utf-8-sig", newline="") as f:
+            sample = f.read(4096); f.seek(0)
+            delim = ";" if sample.count(";") > sample.count(",") else ","
+            rd = csv.DictReader(f, delimiter=delim)
+            for c in rd.fieldnames:
+                if c not in all_cols:
+                    all_cols.append(c)
+            rows.extend(rd)
     if not rows:
         sys.exit("Файл порожній")
 
@@ -322,7 +382,7 @@ def main():
     seen = set()
     for pattern in a.exclude or []:
         for path in sorted(glob.glob(pattern)) or [pattern]:
-            if os.path.abspath(path) == os.path.abspath(a.input):
+            if os.path.abspath(path) in {os.path.abspath(x) for x in a.input}:
                 continue
             seen |= load_ids(path)
     dup_seen = 0
@@ -339,6 +399,11 @@ def main():
         in_file |= ids
 
         exp, exp_note = experience_years(r)
+        claimed = claimed_years(r)
+        if claimed is not None and (exp is None or claimed > exp):
+            exp_note = (f"у summary вказано {claimed:g} р. досвіду; за позиціями "
+                        f"{'немає даних' if exp is None else exp}. " + exp_note).strip()
+            exp = claimed
         edu, course = education_info(r)
         sen = seniority(r)
         trk = qa_track(r)
@@ -409,7 +474,7 @@ def main():
     ))
 
     computed = ["seniority", "qa_track", "exp_years", "exp_note", "education_status", "education_course", "matched_keywords"]
-    cols = list(rows[0].keys())
+    cols = all_cols
     if not a.keep_all_columns:
         nonempty = {k for k in cols if any((x.get(k) or "").strip() for x in rows)}
         # прибираємо також службову хеш-колонку LH (назва = 32 hex-символи)
