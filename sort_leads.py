@@ -11,6 +11,7 @@
   --education S        studying | graduated | none
   --course N           курс навчання (лише для тих, хто ще вчиться), --course-max N
   --seniority a,b      trainee, junior, middle, senior, lead, unknown
+  --job-seeker         лише з бейджем Open to work
   --keep-unknown       не відсікати лідів, у яких для фільтра немає даних
                        (досвід/освіта не витягнуті з профілю)
 
@@ -148,6 +149,8 @@ def main():
     p.add_argument("--course", type=int, help="точний курс")
     p.add_argument("--course-max", type=int, help="курс не вище N")
     p.add_argument("--seniority", help="через кому: junior,middle,unknown")
+    p.add_argument("--job-seeker", action="store_true",
+                   help="лише ліди з бейджем Open to work (badges_job_seeker = true)")
     p.add_argument("--keep-unknown", action="store_true",
                    help="залишати лідів без даних для фільтра досвіду/освіти")
     p.add_argument("--keep-all-columns", action="store_true",
@@ -163,7 +166,7 @@ def main():
 
     keywords = [k.strip().lower() for k in (a.keywords or "").split(",") if k.strip()]
     levels = {s.strip().lower() for s in (a.seniority or "").split(",") if s.strip()}
-    drops = {"exp": 0, "kw": 0, "edu": 0, "sen": 0}
+    drops = {"exp": 0, "kw": 0, "edu": 0, "sen": 0, "js": 0}
     out = []
 
     for r in rows:
@@ -196,6 +199,9 @@ def main():
                     drops["edu"] += 1; continue
                 if a.course_max and (course is None or course > a.course_max):
                     drops["edu"] += 1; continue
+
+        if a.job_seeker and (r.get("badges_job_seeker") or "").lower() != "true":
+            drops["js"] += 1; continue
 
         if levels and sen not in levels:
             drops["sen"] += 1; continue
@@ -233,7 +239,7 @@ def main():
         w.writerows(out)
 
     print(f"Всього: {len(rows)} → після фільтрів: {len(out)} → {a.output}")
-    print("Відсічено: досвід {exp}, стек {kw}, освіта {edu}, seniority {sen}".format(**drops))
+    print("Відсічено: досвід {exp}, стек {kw}, освіта {edu}, seniority {sen}, job seeker {js}".format(**drops))
     no_exp = sum(1 for r in rows if experience_years(r) is None)
     no_edu = sum(1 for r in rows if not (r.get("education_1") or "").strip())
     if no_exp or no_edu:
